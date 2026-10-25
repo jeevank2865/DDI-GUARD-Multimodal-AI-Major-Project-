@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ddi-guard"
+version = "0.1.0"
+description = "Auditable DDI severity research pipeline"
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.1",
+  "torch-geometric>=2.5",
+  "rdkit>=2023.9",
+  "scikit-learn>=1.3",
+  "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+api = ["fastapi>=0.110", "uvicorn>=0.27", "pydantic>=2.6"]
+test = ["pytest>=8"]
+
+[project.scripts]
+ddi-guard-ingest = "ddi_guard.ingest:main"
+ddi-guard-splits = "ddi_guard.make_splits:main"
+ddi-guard-pubchem = "ddi_guard.pubchem:main"
+ddi-guard-graph-manifest = "ddi_guard.build_graph_manifest:main"
+ddi-guard-review-pubchem = "ddi_guard.review_pubchem_mapping:main"
+ddi-guard-chembl = "ddi_guard.chembl_sqlite:main"
+ddi-guard-prepare-chembl = "ddi_guard.prepare_chembl_archive:main"
+ddi-guard-download-chembl = "ddi_guard.chembl_download:main"
+ddi-guard-modality-coverage = "ddi_guard.modality_coverage:main"
+ddi-guard-target-graph = "ddi_guard.target_graph:main"
+ddi-guard-smoke-train = "ddi_guard.smoke_train:main"
+ddi-guard-majority-baseline = "ddi_guard.baselines:main"
+ddi-guard-train-molecular = "ddi_guard.train_molecular:main"
+ddi-guard-train-multimodal = "ddi_guard.train_multimodal:main"
+ddi-guard-export-molecular-predictions = "ddi_guard.export_molecular_predictions:main"
+ddi-guard-compare-experiments = "ddi_guard.compare_experiments:main"
+ddi-guard-train-fingerprint-rf = "ddi_guard.train_fingerprint_rf:main"
+ddi-guard-dailymed-evidence = "ddi_guard.dailymed_evidence:main"
+
+[tool.setuptools.packages.find]
+include = ["ddi_guard*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

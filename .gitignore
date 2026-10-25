@@ -1,0 +1,60 @@
+# Secrets and local environment files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Python environments, caches, and test/build outputs
+venv/
+.venv/
+env/
+.tox/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# OS, editor, and temporary files
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+*.tmp
+*.temp
+*.log
+
+# Local databases and large generated model/data files
+*.db
+*.sqlite
+*.sqlite3
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.joblib
+*.npy
+*.npz
+
+# Downloaded source data and generated feature stores (remain local)
+/data/raw/
+/data/processed/
+
+# Generated experiment artifacts: retain human-readable documentation only.
+/artifacts/*
+!/artifacts/*.md
+!/artifacts/paired_multimodal_validation_v1/
+/artifacts/paired_multimodal_validation_v1/*
+!/artifacts/paired_multimodal_validation_v1/paired_multimodal_validation.md

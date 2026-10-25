@@ -1,0 +1,563 @@
+DDI-GUARD MODEL CODE: COMPLETE FILE-BY-FILE EXPLANATION
+=====================================================
+
+Project: DDI-GUARD
+Scope: Explanation of the four model-related Python files requested:
+  ddi_guard/model.py
+  ddi_guard/train_multimodal.py
+  ddi_guard/research_inference.py
+  ddi_guard/model_evaluation.py
+
+This guide was written by inspecting the current project source. It describes the
+code as implemented; it does not claim clinical validation or production approval.
+The model predicts a DDInter dataset severity label (Minor, Moderate, or Major).
+Those labels and model outputs are research information, not patient-specific medical
+advice, confirmed clinical risk, or treatment recommendations.
+
+
+1. HOW THE FOUR FILES FIT TOGETHER
+----------------------------------
+
+The workflow has four distinct jobs:
+
+1) model.py defines the neural-network building blocks, model configuration, forward
+   pass, output tensors, and safe checkpoint save/load functions.
+2) train_multimodal.py validates and loads source-backed features, applies fixed data
+   splits and feature-coverage rules, trains the model, selects a checkpoint using
+   validation results, calibrates using validation data, and writes evaluation and
+   prediction artifacts.
+3) research_inference.py loads registered, hash-pinned checkpoints and their matching
+   features, validates a requested drug pair, chooses a checkpoint supported by both
+   drugs, performs local research inference, and returns probabilities and provenance.
+4) model_evaluation.py reads saved evaluation artifacts. It verifies hashes,
+   split/support consistency, labels, calibration, and metrics before returning a
+   report. It does not train a model or make a new prediction.
+
+The shared class order is defined in ddi_guard/__init__.py:
+  Minor, Moderate, Major
+
+This ordering matters: output vector index 0 is Minor, index 1 is Moderate, and index
+2 is Major. Saved checkpoints and prediction artifacts are checked against this order.
+
+High-level flow:
+
+  DDInter labeled pairs + fixed split manifest
+                    |
+          verified feature loaders
+   PubChem graphs / ChEMBL target graph / DailyMed vectors
+                    |
+         train_multimodal.py
+                    |
+     model.py forward pass and checkpoint
+                    |
+   evaluation artifacts + validation calibration
+                    |
+         research_inference.py
+                    |
+       local research response
+
+model_evaluation.py independently checks the saved evaluation chain and serves the
+verified metrics to the evaluation view/API.
+
+
+2. MODEL ARCHITECTURE: ddi_guard/model.py
+-----------------------------------------
+
+Purpose
+~~~~~~~
+This file defines a configurable, order-invariant three-class multimodal classifier.
+It can be instantiated with all three modalities or with a selected modality ablation.
+It does not retrieve source data, train itself, or generate natural-language evidence.
+The caller must supply prepared molecular graphs, target graph indices, and/or real
+text feature vectors as appropriate.
+
+2.1 Order-invariant drug-pair representation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Function:
+  symmetric_pair(a, b)
+
+For two feature vectors a and b, it concatenates:
+  a + b
+  absolute difference |a - b|
+  elementwise product a * b
+
+Because each component is unchanged when a and b are exchanged, the pair descriptor
+is symmetric. The prediction is therefore intended to be the same if the user swaps
+Drug A and Drug B. The descriptor has three times the input feature width.
+
+2.2 MolecularEncoder
+~~~~~~~~~~~~~~~~~~~~
+The molecular branch receives molecular graphs built by the feature-processing code.
+A graph contains atom feature rows, bond feature rows, and source/destination indices.
+The actual feature definitions and graph validation are in ddi_guard/features.py.
+
+Default settings in the model are a hidden width of 96 and three message-passing layers.
+The encoder:
+
+- Projects each atom's feature vector into the hidden width and applies ReLU.
+- For each bond, combines the source atom's current state with that bond's attributes.
+- Uses a message MLP to form a message, then sums incoming messages at each atom.
+- Combines each atom's previous state with its aggregate message through an update MLP.
+- Applies a residual-style addition, LayerNorm, and ReLU at each layer.
+- Mean-pools the final atom states for each molecule graph.
+
+The result is one fixed-width vector per molecule, regardless of atom count. The two
+molecule vectors are combined by symmetric_pair and projected into the common model
+hidden width. Graph checks are delegated to validate_graph in features.py.
+
+2.3 RelationalDrugTargetEncoder
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+This encoder consumes a heterogeneous graph containing drug and target entities. It
+uses integer indices for drugs and targets, a relation ID for each directed edge, and
+an edge weight. The source graph is built from the project's verified ChEMBL 34
+bioactivity records.
+
+The encoder:
+
+- Stores a trainable embedding for each drug and target entity.
+- Stores a per-relation, per-hidden-dimension scale vector. This is a diagonal
+  relation transform, which avoids allocating a full hidden-by-hidden matrix for
+  every edge.
+- Scales each source entity vector using its edge's relation vector and edge weight.
+- Aggregates incoming weighted messages at destination entities and normalizes by
+  the sum of absolute incoming edge weights (with a minimum denominator of one).
+- Applies an update MLP, residual addition, LayerNorm, and ReLU.
+- Returns the final embeddings for Drug A and Drug B.
+
+The pair encoder then combines those drug embeddings using symmetric_pair. Relation
+labels preserve evidence/activity categories; edge weights are source-derived confidence
+weights. The code does not reinterpret them as invented binding affinities. ChEMBL
+bioactivity is not automatically proof of a clinical drug-drug mechanism.
+
+2.4 DDIModelConfig
+~~~~~~~~~~~~~~~~~~
+The dataclass records the architecture needed to rebuild a model. It contains:
+
+- Number of drugs, targets, and relation types in the target graph.
+- Text feature dimension.
+- Hidden dimension (default 96), molecular layer count (default 3), and attention head
+  count (default 4).
+- Number of output classes (must equal the project's three labels).
+- Boolean switches for molecular, target, and text modalities.
+
+At least one modality must be enabled. A text-enabled model needs a positive text
+feature dimension. Ablation models use the same overall classifier structure while
+omitting disabled modality-specific encoders/projections.
+
+2.5 MultimodalDDIGuard pair branches
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Each enabled modality produces a pair token with the shared hidden width:
+
+- Molecular: encode both molecular graphs, form the symmetric pair descriptor, project.
+- Target: encode both drug nodes in the target graph, form the symmetric pair
+  descriptor, project.
+- Text: receive a tensor of shape [batch, 2, text_dim], one vector for each drug;
+  form the symmetric pair descriptor, project.
+
+The modality order used by the mask is always:
+  molecular, target, text
+
+The forward pass can receive a batch-level modality mask. If none is supplied, the
+model derives a mask from the actual supplied inputs. It rejects inputs for disabled
+modalities, missing halves of a pair, incompatible batch dimensions, invalid graph
+indices, malformed text tensor shapes, a mask claiming an absent feature, or an example
+with no real modality. Missing modalities may have zero-filled storage in a batch, but
+the corresponding mask is false; such padding is excluded from attention and fusion.
+It is not treated as measured evidence.
+
+2.6 Cross-modal attention, gated fusion, and classification
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The model stacks up to three pair tokens. A batch-first multi-head self-attention layer
+lets the available modality tokens contextualize one another. The padding mask hides
+unavailable modalities. A learned scalar gate scores each attended modality token;
+softmax over valid modalities creates fusion weights. The final shared representation
+is the weighted sum of attended tokens.
+
+A classifier MLP maps the fused vector through a hidden ReLU layer, dropout of 0.15,
+and a final linear layer with three logits. The forward method returns:
+
+- logits: unnormalized scores for Minor, Moderate, Major.
+- probabilities: softmax scores across those labels (before optional calibration).
+- modality_mask: which real modalities were used for each pair.
+- fusion_weights: learned relative weights over the three modality positions.
+- predicted_class: index of the largest probability.
+
+These model probabilities are not validated clinical risk probabilities.
+
+2.7 Checkpoint handling
+~~~~~~~~~~~~~~~~~~~~~~~
+Functions:
+  save_checkpoint(model, checkpoint_path, config_path)
+  load_checkpoint(checkpoint_path, config_path, map_location="cpu")
+
+Saving writes the model state dictionary and a JSON configuration containing the
+format version, architecture config, and class order. Temporary files are replaced
+atomically into place. Loading reconstructs the model from the JSON config and loads
+a weights-only tensor state dictionary with strict key matching. Unsupported class
+order, malformed state data, missing parameters, or shape mismatches fail rather than
+silently adapting the model.
+
+
+3. TRAINING AND DATA PREPARATION: ddi_guard/train_multimodal.py
+---------------------------------------------------------------
+
+Purpose
+~~~~~~~
+This file runs a training experiment for the full model or a modality ablation. Its
+main callable is train_protocol(...); its command-line entry point parses settings and
+prints the resulting experiment metadata. The script writes experiment artifacts under
+artifacts/ in a new or selected run directory. It should not be run casually against an
+existing run tag because output paths can overlap and training writes artifacts.
+
+3.1 Modality names and source preparation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The canonical modality tuple is:
+  molecular, target, text
+
+Molecular features are loaded from the reviewed PubChem compound records using the
+approved-compound loader and converted from SMILES into molecular graphs through
+molecule_to_graph. The source audit and compound data are recorded in the experiment
+fingerprint.
+
+The target loader checks that ChEMBL source audit and graph manifest identify release
+34; checks SHA-256 values for edge data, target graph, mapping file, and import audit;
+validates graph tensors and relation/entity ranges; and confirms source edge provenance
+fields. It constructs the drug-to-graph index mapping and set of drugs with target
+records.
+
+The text loader reads a manifest and accepts only vectors whose rows have drug IDs,
+source/evidence IDs, a valid source URL, a source version or date, drug-general scope,
+and label independence. It verifies each vector file's project-local path and SHA-256,
+loads arrays without pickle, and rejects non-finite, non-vector, or dimension-mismatched
+features. These checks preserve source identity and guard against untracked or altered
+vectors. The DailyMed feature is general drug-label text, not pair-specific interaction
+proof.
+
+The resulting sources object records files, dimensions, hashes, verified records, and
+coverage. A deterministic JSON encoding of those source metadata is SHA-256 fingerprinted
+and stored with the experiment.
+
+3.2 Fixed splits and coverage selection
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Training labels and pair IDs come from data/processed/ddi_pairs_full.json. The fixed
+split assignments come from artifacts/split_manifest.json. Supported protocols are:
+
+- pair_disjoint: pair IDs are disjoint among training, validation, and test; a drug can
+  appear in more than one partition, so the test asks about unseen pairs among known
+  drugs.
+- cold_drug: drug ID sets are also disjoint among partitions, and every pair in one
+  partition must refer only to drugs assigned to that partition. This tests a stricter
+  new-drug setting.
+
+The script validates that pair IDs are unique, known, and non-overlapping. For each
+pair, _pair_mask marks a modality available only if both drugs have that modality.
+Pairs with no selected usable modality are excluded and written to uncovered_pairs.csv.
+An optional support_modalities list further restricts the experiment to rows where all
+named modalities exist; this is useful for fair matched-support ablations. The
+pair_coverage_manifest.json records selected pair IDs and modality availability for
+each split.
+
+Coverage filtering means an experiment's scores describe only that run's supported
+pairs, not every DDInter pair. Comparisons are most informative when experiments use
+the same fixed test IDs/support.
+
+3.3 Building model inputs
+~~~~~~~~~~~~~~~~~~~~~~~~
+_make_inputs prepares batches according to the enabled modalities. For molecular
+features, it batches graphs only for rows with real molecular features and records the
+original row positions so the model can align them. For target inputs, it passes the
+verified full target graph and drug indices. For text, it constructs a [batch, 2,
+text_dim] tensor and fills only rows whose text mask is true. The per-pair Boolean mask
+is always passed into the model so a padded value cannot be mistaken for a measured
+feature.
+
+3.4 Training settings and optimization
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Default command-line settings are:
+
+- Protocol: pair_disjoint.
+- Modalities: molecular,target,text.
+- Seed argument: 42.
+- Maximum epochs: 20; batch size: 128; early-stopping patience: 4.
+- Hidden dimension: 96; learning rate: 0.001.
+- Optimizer: AdamW with weight decay 0.0001.
+- Scheduler: ReduceLROnPlateau on validation loss, factor 0.5, scheduler patience 2.
+- Loss: cross entropy with class weights inverse to the training class frequencies.
+- Gradient norm clipping: maximum 2.0.
+
+The rows are shuffled each epoch using Python's local Random(seed + epoch). The code
+records a seed and dependency versions. The file does not call torch.manual_seed, so the
+seed argument alone does not make neural parameter initialization fully deterministic.
+
+The training loop checks that loss and gradients remain finite. It updates the model
+with training batches, computes logits on the validation partition, records validation
+loss and macro-F1, adjusts the scheduler, and applies early stopping. Best checkpoint
+selection is validation macro-F1, breaking ties with lower validation loss. Test labels
+are not used to select the checkpoint.
+
+3.5 Calibration and held-out evaluation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+After training, the script reloads best_validation.pt and verifies that its validation
+logits match the best saved validation logits. It then runs validation and test
+inference. A scalar temperature is fitted by minimizing negative log-likelihood on
+validation logits only. The same temperature transforms the held-out test logits.
+No test labels are used to fit the temperature.
+
+The evaluation uses the label order Minor, Moderate, Major. Metrics are computed for
+both raw and validation-temperature-calibrated probabilities. Saved metrics include
+accuracy, balanced accuracy, macro-F1, weighted-F1, per-class precision/recall/F1/
+support, confusion matrix, macro one-vs-rest AUROC when computable, Brier score,
+negative log-likelihood, and expected calibration error.
+
+3.6 Artifacts written for an experiment
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The run directory typically contains:
+
+- model_config.json: architecture dimensions and modality flags.
+- best_validation.pt: selected model weights.
+- last_training_state.pt: resumable model/optimizer/scheduler/training state.
+- training_history.csv: epoch-level training/validation loss, macro-F1, and learning rate.
+- evaluation.json: protocol, modalities, settings, metrics, calibration, hashes, and
+  artifact paths.
+- test_predictions.npz: pair IDs, labels, raw probabilities, calibrated probabilities,
+  and metadata.
+- pair_coverage_manifest.json: selected IDs and modality masks for train/validation/
+  test.
+- uncovered_pairs.csv: excluded pairs and reasons.
+
+Resume is allowed only when the saved training state's model config, modality set, and
+source fingerprint match. The script rejects invalid protocol/modality names and
+nonpositive training parameters.
+
+3.7 Command-line usage (examples only)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+From the project root, the source supports commands in this form:
+
+  python -m ddi_guard.train_multimodal --project-root "." --protocol pair_disjoint --modalities molecular,target,text --run-tag new_research_run
+
+  python -m ddi_guard.train_multimodal --project-root "." --protocol cold_drug --modalities molecular,target,text --run-tag new_cold_drug_run
+
+A modality ablation can specify a subset, for example:
+
+  python -m ddi_guard.train_multimodal --project-root "." --protocol pair_disjoint --modalities molecular,target --support-modalities molecular,target,text --run-tag new_matched_ablation
+
+These are examples of supported syntax, not commands executed for this guide. Training
+writes artifacts; use a unique run tag and preserve existing checkpoints and outputs.
+
+
+4. RESEARCH INFERENCE: ddi_guard/research_inference.py
+------------------------------------------------------
+
+Purpose and policy separation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+This module exposes local research inference using registered, verified checkpoints.
+Its module documentation explicitly says that these checkpoints are not exposed through
+the production /api/predict route. The project keeps the academic route separate from
+production approval. The API's /api/research/predict route checks the research-demo
+policy gate before calling infer_research_pair; production /api/predict remains governed
+by its separate approval state.
+
+4.1 Registered checkpoint candidates
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+MODEL_SPECS lists four pair-disjoint candidates and pins each candidate's run directory,
+modality set, checkpoint hash, config hash, evaluation hash, and test-prediction hash:
+
+- molecular_target_text: full molecular + ChEMBL target + DailyMed text model.
+- molecular_target: molecular + target model.
+- target: target-only model.
+- molecular: molecular-only model.
+
+The full model is preferred when both drugs have all three verified modalities. If it
+cannot be used, the inference selector considers molecular+target, then molecular-only,
+then target-only according to a fixed priority. The molecular-only/target-only choice
+is based on the model registry and validation history documented in the code; it does
+not compare models using the new pair's output or held-out test labels. There is no
+text-only fallback. If neither drug pair shares a supported molecular or target input,
+inference fails with a clear insufficient-features error.
+
+4.2 Artifact and feature verification before load
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Before loading a candidate, _bundle verifies the exact SHA-256 of the checkpoint,
+config, evaluation JSON, and saved test-prediction artifact against hard-coded registry
+values. It checks that the evaluation is complete and pair-disjoint, the checkpoint
+reload was verified, the calibration temperature is positive and validation-only, the
+dataset and split manifest hashes match, the checkpoint/config paths match evaluation
+metadata, and class order and modality flags are correct.
+
+It also checks installed dependency versions against the recorded versions when they
+were recorded. The source loaders are shared with training. Source fingerprints, text
+manifest hashes and dimension, target graph dimensions, molecular feature schema, and
+modality-specific source hashes must be consistent. It loads the model with the safe
+checkpoint loader and validates saved probability shape/class order. If a pinned
+artifact has changed or is absent, inference fails closed; it does not quietly swap in
+an unregistered checkpoint.
+
+4.3 Drug resolution and model input selection
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The public function is:
+  infer_research_pair(drug_a, drug_b)
+
+Inputs must be non-empty strings. The function resolves them through the reviewed drug
+catalog. Unknown names/IDs, ambiguous identities, or selecting the same drug twice are
+rejected. It obtains actual feature availability separately for molecular, target, and
+text for each drug. A modality is available to a pair only when both members have it.
+
+The chosen model is loaded from the validated bundle. Inference then reuses the same
+training-time loaders, graph batching, pair masks, input builder, class order, and
+validation-fitted temperature. It runs in torch.inference_mode(). The probability
+vector must have exactly three finite nonnegative entries and sum to one; otherwise the
+function raises an error.
+
+4.4 Response fields and provenance
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+A successful response includes:
+
+- Research status, resolved Drug A and Drug B IDs/names.
+- predicted_severity and class_order.
+- class_probabilities for Minor, Moderate, and Major.
+- An interpretation that probabilities are validation-temperature-scaled model
+  values, not clinical confidence or patient-specific risk.
+- Model version, checkpoint path and SHA-256.
+- Calibration method, validation-only partition, and temperature.
+- Pair-disjoint protocol and best training epoch / validation macro-F1 metadata.
+- Per-drug modality coverage and the modalities actually enabled in the selected
+  checkpoint.
+- Preprocessing and checkpoint-reload verification markers.
+- Supporting evidence provenance per drug: PubChem structure source/CID when available,
+  ChEMBL 34 target evidence records, and DailyMed source/evidence identifiers, URL,
+  version, and general-drug scope where available.
+- Explicit research and evidence limitations.
+
+The evidence is individual-drug source information. DailyMed text or ChEMBL target
+records do not automatically prove a pair-specific interaction mechanism. A DDInter
+severity prediction is model output; it is not a confirmed clinical conclusion.
+
+The API route may reject ineligible drugs before calling this module, return 422/404
+for unsupported or invalid pairs, or return 503 if the research gate is closed or
+verified artifacts are missing/changed. A failed inference is not replaced with a
+fabricated prediction.
+
+
+5. VERIFIED MODEL EVALUATION: ddi_guard/model_evaluation.py
+-----------------------------------------------------------
+
+Purpose
+~~~~~~~
+This module exposes an artifact-only verifier for the saved full three-modality
+research evaluation. It is deliberately not a training module and does not calculate
+new model predictions. Its public function is:
+  get_model_evaluation(protocol="pair_disjoint")
+
+Supported protocols are pair_disjoint and cold_drug. The function reads the paired
+report at artifacts/paired_multimodal_validation_v1/paired_multimodal_validation.json,
+then locates the full molecular + target + text run for the chosen protocol.
+
+5.1 Integrity and provenance checks
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The module verifies SHA-256 values for the evaluation JSON, prediction NPZ, checkpoint,
+split manifest, dataset manifest, and pair coverage manifest. It validates referenced
+molecular graph manifest, PubChem compound records, target graph and target manifest,
+and text feature manifest as well.
+
+It rejects paths that leave the project root or required files that are missing. It
+checks the evaluation's protocol/modality identity, checkpoint reload, split/data
+hashes, target and text feature provenance, and validation-only calibration metadata.
+
+It opens NPZ data with allow_pickle=False and checks unique pair IDs, label and
+probability shapes, saved class order, protocol, calibration temperature, and that the
+prediction IDs equal the covered test IDs. Test IDs must belong to the fixed test split.
+For cold-drug runs, train/validation/test drug sets must also be disjoint. Ground-truth
+labels are looked up again in the source dataset and compared to saved labels.
+
+The verifier reconstructs temperature-scaled probabilities from raw probabilities and
+checks they match the saved calibrated values. It recomputes metrics from the saved
+labels/probabilities and checks them against the evaluation JSON. Confusion-matrix
+counts and per-class support must add up to the sample count.
+
+5.2 Reported metrics and interpretation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The returned report includes protocol title, model/modality labels, sample count, class
+supports, split counts, verified metrics, a compact summary, integrity-check results,
+artifact paths and hashes, calibration details, limitations, and a research-only
+clinical-status statement.
+
+The underlying compute_metrics helper (in evaluation.py) computes accuracy, balanced
+accuracy, macro-F1, weighted-F1, per-class precision/recall/F1/support, confusion
+matrix, macro one-vs-rest AUROC when the data support it, multiclass Brier score,
+negative log-likelihood, and expected calibration error with 15 equal-width bins.
+The model_evaluation module also reports macro precision and macro recall.
+
+Its summary identifies the strongest and weakest per-class F1, the largest off-diagonal
+confusion, and a restrained follow-up suggestion. Any follow-up recommendation is
+about future research design and requires selecting settings using training/validation
+data while leaving the held-out test set unchanged.
+
+A verified artifact means the saved experimental chain is internally consistent and
+hash-matched. It does not establish that DDInter labels are clinically correct, that the
+model generalizes to all populations, or that predictions improve patient outcomes.
+The cold-drug protocol has limited rare-class support, which makes some per-class
+estimates uncertain.
+
+The FastAPI app serves the report through GET /api/model-evaluation with a protocol
+query for pair_disjoint or cold_drug. The route converts verification failures into a
+service-unavailable response rather than returning unverified metrics.
+
+
+6. IMPORTANT DISTINCTIONS AND LIMITATIONS
+-----------------------------------------
+
+- A model architecture is not the same as a trained model. model.py defines parameter
+  layers; a checkpoint contains learned parameter values.
+- A model checkpoint is not the same as a complete inference pipeline. Inference also
+  needs the matching config, preprocessing code, feature sources/manifests, and
+  calibration value.
+- Training, validation, and test sets serve different purposes. The source code
+  selects checkpoints from validation macro-F1/loss and fits temperature on validation
+  only; held-out test artifacts are for final reporting.
+- Pair-disjoint testing asks about pairs not assigned to training, but drugs may be
+  shared across splits. Cold-drug testing holds out drug identities between splits.
+- A coverage manifest documents which rows have the required modalities. Results apply
+  to those covered examples, not automatically to every DDInter pair.
+- Modality ablations should be compared on identical test support to attribute
+  differences to modalities fairly.
+- DailyMed text is drug-level label content; ChEMBL edges are drug-target bioactivity.
+  Neither is necessarily pair-specific DDI evidence.
+- Probabilities are model scores calibrated by a scalar temperature fitted to the
+  validation set. They are not clinically validated risk estimates.
+- The software and model are a research prototype. They are not a substitute for a
+  clinician, not validated for patient outcomes, and not authorized for diagnosis,
+  treatment selection, or medication changes.
+- The project's research route and production route have separate policy checks. The
+  existence of a research checkpoint does not imply production or clinical approval.
+
+
+7. QUICK FILE REFERENCE
+-----------------------
+
+File: ddi_guard/model.py
+Role: Neural network definitions, modality configuration, forward pass, and checkpoint
+      serialization/reload.
+Start here to understand: encoders, pair symmetry, attention/gated fusion, logits.
+
+File: ddi_guard/train_multimodal.py
+Role: Source validation, feature preparation, split/coverage logic, training,
+      validation-based checkpoint selection, calibration, and artifact writing.
+Start here to understand: how datasets become batches and how checkpoints are trained.
+
+File: ddi_guard/research_inference.py
+Role: Fixed checkpoint registry, integrity checking, supported-drug routing, local
+      inference, calibrated output, and evidence provenance.
+Start here to understand: how the app selects a real model response for a pair.
+
+File: ddi_guard/model_evaluation.py
+Role: Strict verification and reporting for saved full-model evaluation artifacts.
+Start here to understand: how the evaluation API checks metrics and their provenance.
+
+Related files referenced by these modules:
+  ddi_guard/features.py       Molecular feature schema and graph creation/validation.
+  ddi_guard/evaluation.py     Metric computation, temperature calibration, prediction NPZ.
+  ddi_guard/api.py            HTTP routes and research/production policy gates.
+  ddi_guard/__init__.py       Label order and label-to-index mapping.
+
+
+END OF DOCUMENT

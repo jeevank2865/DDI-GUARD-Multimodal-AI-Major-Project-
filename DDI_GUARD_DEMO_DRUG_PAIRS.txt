@@ -1,0 +1,23 @@
+MAJOR INTERACTIONS
+
+1. Oxaliplatin + Ziprasidone
+2. Atazanavir + Dexlansoprazole
+3. Lurasidone + Bupropion
+4. Pazopanib + Procainamide
+5. Vilazodone + Bupropion
+
+MODERATE INTERACTIONS
+
+1. Methylprednisolone + Terazosin
+2. Methylprednisolone + Bumetanide
+3. Bexarotene + Clonazepam
+4. Ofloxacin + Quinine
+5. Clemastine + Clonidine
+
+MINOR INTERACTIONS
+
+1. Modafinil + Prednisone
+2. Ranolazine + Terbinafine
+3. Minoxidil + Tadalafil
+4. Atazanavir + Caffeine
+5. Theophylline + Clobazam

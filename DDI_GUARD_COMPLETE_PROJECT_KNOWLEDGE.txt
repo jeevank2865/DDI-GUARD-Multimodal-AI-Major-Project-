@@ -1,0 +1,786 @@
+DDI-GUARD — COMPLETE PROJECT KNOWLEDGE DOCUMENT
+Prepared: 2026-10-22
+Project root examined: this repository root
+Purpose: internal academic project reference, based on repository implementation and checked artifacts available during this review.
+
+IMPORTANT DELIVERY NOTE
+The requested destination was inside the project. The user explicitly instructed: “do not change any code or any thing from project.” To honor that, this knowledge document is saved outside the project at /private/tmp/DDI_GUARD_COMPLETE_PROJECT_KNOWLEDGE.txt. No file in the project was intentionally modified for this document. This is a working local document; /private/tmp may be cleaned by the operating system.
+
+FACTS AND VERIFICATION STATUS
+- DDI-GUARD is a research/academic demonstration for drug–drug interaction (DDI) severity classification.
+- The project contains a genuine three-modality model using molecular, drug–target graph, and DailyMed-derived text features. Pair-disjoint and cold-drug experiments are present in the checked evaluation artifacts.
+- The full-model macro-F1 values reported by the paired validation artifact are 0.7473 on pair-disjoint common support (n=1,802) and 0.3664 on cold-drug common support (n=253). These are different split protocols and must not be pooled.
+- The research prediction route is locally available for supported feature combinations. The production/clinical prediction route remains disabled and returns HTTP 503 under approval policy. This does not establish clinical readiness.
+- DailyMed text coverage is partial: 652 of 1,939 mapped drugs (33.6%) have retained text vectors in the audited corpus. Coverage among labeled-universe IDs differs by split.
+- The selected pair-disjoint full checkpoint is selected by validation criteria, not by held-out test score alone. Its exact path and hash are recorded in Section 9.
+- The cold-drug full-model test set has only 14 Minor examples. Metrics for that class are highly uncertain; the measured Minor recall is 2/14.
+- Latest recorded automated test report: 73 passing tests (2026-10-21). This documentation task did not rerun tests.
+- Clinical validation, regulatory approval, prospective validation, and clinical utility are NOT VERIFIED / NOT ESTABLISHED.
+- This document records current evidence and known stale documentation conflicts. For publication, re-open each cited artifact and verify that no newer run supersedes it.
+
+CONTENTS
+ 1. Project Overview
+ 2. Background and Domain Knowledge
+ 3. Dataset Inventory and Data Provenance
+ 4. Data Preprocessing and Feature Engineering
+ 5. ML Models and Algorithms
+ 6. Mathematical Formulation
+ 7. Training Methodology
+ 8. Experimental Design and Leakage Prevention
+ 9. Evaluation Metrics and Results
+10. Prediction and Inference Pipeline
+11. Explainable AI and Evidence
+12. Backend and API Architecture
+13. Frontend and UI/UX
+14. 3D Molecular Visualization
+15. AI Research Assistant and Gemini Integration
+16. Technology Stack and Development Environment
+17. Project Directory and Important Files
+18. Installation, Configuration, and Execution
+19. Testing and Quality Assurance
+20. Security, Ethics, and Clinical Limitations
+21. Current Problems and Unresolved Issues
+22. Future Scope
+23. Research Paper Preparation
+24. PowerPoint Presentation Preparation
+25. Viva Preparation (50 questions and answers)
+26. Glossary
+27. FACTS THAT MUST BE VERIFIED BEFORE PUBLICATION
+
+EVIDENCE POLICY
+Primary evidence is actual source code, manifests, hashes, run configurations, checkpoint files and machine-readable evaluation reports. Narrative summaries are secondary. When they disagree, this document calls out the conflict and prefers the more directly auditable current artifact without silently rewriting the old record. Numbers below refer to the checked artifacts under the project root and must be rechecked before external publication.
+
+1. PROJECT OVERVIEW
+
+1.1 Title and abstract
+Full title: DDI-GUARD: Multimodal Explainable AI for Drug–Drug Interaction Severity Prediction.
+
+Abstract draft: Drug–drug interactions can alter therapeutic effects or increase patient risk, and pairwise interaction resources are difficult to search consistently at scale. DDI-GUARD is an academic research system that combines molecular graph features, drug–target network features, and drug-label text evidence to classify interactions into Minor, Moderate, and Major severity classes. Its data pipeline uses DDInter 2.0 labels, PubChem structures, ChEMBL 34 drug–target activity records, and DailyMed labeling passages. The implementation includes pair-disjoint and cold-drug evaluation, modality ablations, validation-fitted temperature calibration, evidence provenance, and a local research inference API. In the checked paired-support evaluation, the full model achieved macro-F1 0.7473 on 1,802 pair-disjoint test pairs and 0.3664 on 253 cold-drug test pairs. Cold-drug Minor recall was 0.1429 on 14 examples, illustrating substantial generalization limitations and class uncertainty. The system is a research demonstration; it has not been clinically validated and must not guide treatment.
+
+1.2 Problem and motivation
+DDI references often present heterogeneous descriptions and evidence; severity prediction is a multiclass learning problem with incomplete structures, target coverage, and label-text coverage. The project investigates whether complementary molecular, biological-network, and label-text signals can support research classification and evidence display. It does not claim to replace a drug label, pharmacist, clinician, or curated interaction database.
+
+1.3 Objectives and contributions supported by artifacts
+- Build a traceable ingestion and pair-label preparation workflow around DDInter 2.0.
+- Construct molecular graph inputs from reviewed PubChem SMILES.
+- Construct a relation-aware drug–target network from ChEMBL 34 activity records.
+- Ingest DailyMed label sections with source and content hashes and produce split-specific TF-IDF features.
+- Train and compare modality combinations on fixed pair-disjoint and cold-drug protocols, using common supports for paired comparisons.
+- Fit scalar temperature calibration on validation data only for the selected run.
+- Expose an explicitly research-only local inference path separately from the disabled production route.
+- Show source provenance and missing-modality coverage where available.
+
+These contributions describe engineering and experiments. They do not establish clinical benefit, causal mechanism, prospective validity, or regulatory status.
+
+1.4 Intended users, boundaries, and status
+Intended use: student/researcher demonstration, academic discussion, reproducible offline evaluation, and exploration of source evidence. Intended audience: B.Tech CSE evaluators and biomedical informatics/ML researchers. Boundaries: a dataset classification result is not a treatment recommendation; a confidence score is model output, not calibrated patient-level probability unless proven for that target deployment; LLM chat content is not model output or verified evidence.
+
+2. BACKGROUND AND DOMAIN KNOWLEDGE
+
+2.1 General scientific context (not a project finding)
+A drug–drug interaction occurs when one medicine affects the exposure, effect, or safety profile of another. Pharmacokinetic interactions concern absorption, distribution, metabolism, or excretion; pharmacodynamic interactions concern effects at physiological targets or pathways. Severity depends on dose, route, duration, comorbidities, patient characteristics, and the specific evidence standard. A static pair classifier cannot model all those conditions unless it receives and validates them.
+
+2.2 Dataset severity labels
+The project maps source labels to Minor, Moderate, and Major according to DDInter records. “Minor” generally denotes lower clinical significance, “Moderate” a potentially clinically meaningful interaction that may require monitoring or adjustment, and “Major” a potentially serious interaction. These are broad source-category descriptions only; use DDInter's official documentation and the exact row-level source definition when writing a paper. This model predicts dataset categories, not patient-specific clinical severity.
+
+2.3 Why the task is difficult
+- Class imbalance: labeled DDInter rows are dominated by Moderate interactions.
+- Pair overlap and drug familiarity can inflate random pair performance; pair-disjoint and cold-drug splits answer different questions.
+- New drugs can lack molecular records, target-network edges, or DailyMed coverage.
+- Label wording and source coverage are incomplete, heterogeneous, and potentially noisy.
+- Biological relationships are not equivalent to clinical outcomes; graph edges are sourced activity records, not causal DDI labels.
+- Cold-drug Minor support is only 14, so its class metrics are unstable.
+- The model is trained and tested on curated data distributions that may not represent clinical practice.
+
+2.4 Why evidence provenance matters
+Every retrieved feature or explanatory text should retain source identity, record/document identifiers, retrieval time, and content hash. Provenance makes it possible to distinguish dataset labels from external support and generated language. The system's retrieved label passages are drug-level evidence. They are not necessarily a direct explanation of the specific pair's interaction.
+
+3. DATASET INVENTORY AND DATA PROVENANCE
+
+3.1 DDInter 2.0
+Role: source of pair-level DDI severity labels. Source URL: https://pmc.ncbi.nlm.nih.gov/articles/PMC11701621/ (paper; verify the official dataset release and terms separately). Local exports were reported in an external user-selected dataset directory; those source files are external to this repository and their ongoing availability is NOT VERIFIED here.
+
+Ingested ATC CSV exports: A, B, D, H, L, P, R, V. Required columns include `DDInterID_A`, `Drug_A`, `DDInterID_B`, `Drug_B`, `Level`. Audit counts: 222,383 raw rows; 160,235 canonical unordered pairs including unknown-only pairs; 130,422 unique labeled pairs; 1,939 distinct mapped DDInter IDs. Labeled unique class counts: Minor 6,833; Moderate 96,675; Major 26,914. Unknown/invalid label rows: 47,182; unknown-only pairs: 29,813; 44,779 duplicate labeled records collapsed; 62,148 total duplicate rows including unknown records. Audit reports no conflicting labels, self-pairs, or malformed pair IDs in the validated ingestion. These counts are preprocessing/audit quantities, not counts for every model test support.
+
+Class labels are encoded in project order `[Minor, Moderate, Major]`. Pair identity is canonicalized by sorted DDInter IDs, and duplicate labels are collapsed using the ingestion logic. Unknown-only pairs are not treated as labeled examples. Relevant artifacts include `data/processed/ddi_pairs_full.json`, `ddi_pair_manifest.csv`, `data_exclusion_ledger.csv`, `drug_identity_mapping.csv`, `ddi_class_distribution.json`, and `ddi_guard/ingest.py`.
+
+3.2 PubChem
+Role: molecular structure and compound information. PUG REST documentation: https://pubchem.ncbi.nlm.nih.gov/docs/pug-rest. The audit reports 1,939 DDInter IDs queried; 1,472 accepted unique structures after exact-name/synonym review and RDKit checks; 467 unresolved. Of those, 940 graph-matched validated 3D conformers were available. In the labeled-drug universe, 1,436 IDs have molecular features and 466 are missing. Structure matching and acceptance rules are in preprocessing/audit artifacts; do not infer structure coverage from total queries. PubChem record-level attribution and license implications require verification before republishing bundled records.
+
+3.3 ChEMBL 34
+Role: source for drug–target biological activity features and a heterogeneous graph. Release information: https://chembl.blogspot.com/2024/04/chembl-34-is-out.html. The official archive used was verified at 4,859,330,198 bytes, SHA-256 `7d40409e4f31440674a79e26db628015e82b85b056a7d8234efe9c95b6cbd8e7`; archived at `/private/tmp/chembl_34_sqlite.tar.gz`. Extracted database path: `data/raw/chembl_34_extracted/chembl_34/chembl_34_sqlite/chembl_34.db`. Archive checksum was checked before extraction; SQLite quick-check and release identity were reported as passing.
+
+Audit counts: 1,522 mapped drug candidates (174 ambiguous); 6,322 targets; 266,991 assays; 1,050,131 retained activity-manifest records; 166,712 usable activity records; 105,982 filtered drug–target edges; graph with 1,166 drugs, 2,699 targets, 745 relation types, and 211,964 directed edges. 1,134 graph drug IDs overlap the labeled-pair universe. The edge filtering requires confidence at least 8 and standardized value/unit; units, relation types, and operators are retained. The model does not turn these records into invented affinities. License attribution: CC BY-SA 3.0; project has `data/raw/chembl_34/REQUIRED.ATTRIBUTION`. Verify release-specific attribution and any share-alike obligations before distributing data derivatives.
+
+3.4 DailyMed
+Role: drug-label text evidence, specifically SPL sections 34071-1 (Warnings), 34073-7 (Drug Interactions), and 34078-6 (Clinical Pharmacology), accessed through DailyMed API v2. Service documentation: https://www.dailymed.nlm.nih.gov/dailymed/app-support-web-services.cfm. The pipeline covered 1,939 mapped drug inputs; 652 have retained text/vector coverage; 879 passages were retained; 713 exact-name label matches; 624 mapped entries with relevant sections. There were 403 recorded retrieval errors: 393 HTTP 429, six read timeouts, two TLS timeouts, and two connection resets. Coverage is partial, not universal. Text is drug-general; it does not necessarily describe the queried pair.
+
+DailyMed text manifest/content hashes were reported verified. Split-specific train-only TF-IDF uses 2,048 dimensions. Pair-disjoint selected run fits the vectorizer only on training-drug text. 634 covered drug IDs overlap the labeled-drug universe. Provenance contains SPL/document identifiers, URLs, source hashes, timestamps, and drug IDs; consult actual manifests before quoting per-record examples. Existing corpus and manifests must be preserved. Respectful retry proposal in audit: retry failed IDs only; honor `Retry-After`; otherwise full-jitter exponential backoff starting at 30 seconds, capped at 10 minutes, at most five retries; concurrency 1 and no more than one request per second; stop after three consecutive 429s. This is a conservative project policy, not a claimed DailyMed quota.
+
+3.5 Data distinctions and licensing
+Raw rows, canonical pairs, unique labeled pairs, unknown-only pairs, model splits, and common-support subsets are different denominators. Never report them as interchangeable. DDInter, PubChem, ChEMBL, and DailyMed have separate source terms and attribution needs. NOT VERIFIED: a full legal review of redistribution rights for all downloaded data and derived records.
+
+4. DATA PREPROCESSING AND FEATURE ENGINEERING
+
+4.1 Identity and pair processing
+`ddi_guard/ingest.py` reads source CSVs, validates required fields, maps labels, canonicalizes unordered pairs by sorted DDInter identifiers, produces deterministic SHA-derived pair IDs, collapses duplicate labeled rows, and records exclusions/unknown labels. Drug identity mapping retains names and identifiers. Exact behavior is defined in code and manifests; do not substitute normalized names as a unique biomedical identity.
+
+4.2 Molecular inputs
+PubChem SMILES are validated and canonicalized/parsed with RDKit. Invalid or unresolved structures are tracked as missing. The graph builder creates atoms as nodes and bonds as edges, with 47 atom features and 16 bond features. Bond edges are represented bidirectionally. The architecture uses molecular graphs; 3D conformers are for UI visualization and are not classifier inputs. The feature construction code is in `ddi_guard/features.py` and related molecular preprocessing modules.
+
+4.3 Target graph
+ChEMBL activities are mapped to drug and target identifiers, quality filtered, and retained with target IDs, source record IDs, activity relation types, standardized values/units and provenance. A heterogeneous drug–target graph is converted into a relation-aware representation. It has 745 relation types in the audited graph. The global graph includes mapped entities beyond each supervised split, which creates a transductive external-side-feature caveat for cold-drug interpretation (Section 8).
+
+4.4 Text inputs
+DailyMed SPL passages are downloaded and retained with document/source provenance. The classifier's text modality is 2,048-dimensional TF-IDF, not PubMedBERT, a transformer embedding, or an LLM vector. The selected pair-disjoint text vectorizer is fit on training-drug documents only; validation/test documents are transformed without fitting. Text features are combined per drug pair symmetrically by sum, absolute difference, and elementwise product, giving 3×2048 pair-text input before its projection/encoder. Missing modalities are represented through explicit availability handling rather than evidence fabricated for missing drugs.
+
+4.5 Splitting, normalization, labels, random state
+Label order is `[Minor, Moderate, Major]`. Pair-disjoint protocol: seed 42, stratified 70/15/15, with 91,295 train, 19,563 validation, and 19,564 test pairs in the full labeled dataset. Cold-drug protocol partitions drug identifiers (1,331 train, 285 validation, 286 test), with 63,447 train, 3,093 validation, and 2,804 test pair candidates; 61,078 cross-partition pairs excluded. The full model has smaller common-support subsets (Section 8/9). Exact split manifest SHA-256: `b49366e1a39784f9f79c9652598357e531cf14f4f4b349d4feeaab8922c5773a`; dataset SHA-256: `e9c56c3ab38bb8746e825655e8875e99d6516dadb77dd38f60c29100acce33f`.
+
+Do not assume all transforms are normalized: inspect the specific feature pipeline/config before stating normalization. Missing data may cause support filtering for a given modality combination. The model's explicit availability masks gate absent modalities; evaluation comparisons use matched support where specified.
+
+5. ML MODELS AND ALGORITHMS
+
+5.1 Molecular graph encoder
+Custom molecular message-passing neural network implemented in `ddi_guard/model.py`, with three message-passing layers, hidden size 96, edge-conditioned MLP, residual updates, LayerNorm, and mean graph pooling. It is a molecular GNN. The inspected code does not establish that it is a canonical GIN or canonical PyG convolution; avoid naming it GIN. Atom and bond features are those described in Section 4.2.
+
+5.2 Drug–target graph encoder
+Custom relation-aware encoder with learned entity embeddings and relation-specific diagonal relation vectors, weighted neighbor aggregation normalized by absolute edge weight. It supports drug/target graph messages. It has R-GCN-like motivation, but inspection did not identify a canonical PyG RGCNConv implementation. Call it a custom relation-aware drug–target GNN; do not claim exact R-GCN unless source implementation is changed and verified.
+
+5.3 Text/mechanism encoder
+DailyMed passages transformed to sparse TF-IDF vectors of width 2,048, then pair represented symmetrically through concatenated sum, absolute difference, and product. Not PubMedBERT, BioBERT, transformer, or LLM. It is a text evidence feature pathway. It does not inherently extract a structured causal mechanism.
+
+5.4 Fusion and classifier
+Three modality representations are treated as tokens and passed through PyTorch MultiheadAttention with four heads, explicit availability masks, and a learned scalar gate followed by softmax weighting and weighted fusion. The classifier head is 96→96 with ReLU, dropout 0.15, then three output logits. Softmax yields the class probability vector. Attention/gate internals are not a validated explanation method.
+
+5.5 Baselines and variants
+- Modality ablations include text only, molecular+text, target+text, molecular+target control, and full molecular+target+text on matched supports (paired validation artifact).
+- Random Forest baseline uses Morgan radius-2 fingerprints with 1,024 bits per drug and pair union/XOR/intersection (3,072 input bits); 150 trees, sqrt feature sampling, min leaf 2, balanced_subsample, seed 42. It is not the selected API model.
+- Majority baseline appears in final audit for context.
+- XGBoost: NOT FOUND as an implemented experiment in checked sources.
+- 3D structure model: NOT IMPLEMENTED / NOT FOUND.
+- Molecular atom attribution and target attribution: NOT IMPLEMENTED in verified inference path.
+
+5.6 Checkpoints and inference
+PyTorch checkpoints include model state/configuration and are loaded by the research adapter with compatibility checks. See Section 9 for selected path/hash. Checkpoint is a trained research artifact, not an approved clinical model. Do not change/overwrite checkpoint artifacts during document preparation.
+
+6. MATHEMATICAL FORMULATION
+
+Notation below describes verified code-level operations at a conceptual level. It is not a substitute for exact tensor-level code when preparing a methods paper.
+
+6.1 Pair representation
+For per-drug modality vector x_A and x_B, symmetric pair input is:
+  p(x_A,x_B) = [x_A + x_B ; |x_A - x_B| ; x_A ⊙ x_B]
+where `;` concatenates, `|.|` is elementwise absolute value, and `⊙` is elementwise product. This construction makes the pair representation invariant to swapping A and B. Source: pair feature construction in `ddi_guard/model.py`/feature pipeline; verify the exact call site before reproducing as a formal claim.
+
+6.2 Molecular message passing
+For atom node i at layer l, a generic notation matching the implemented edge-conditioned message passing is:
+  m_i^(l) = AGG_{j∈N(i)} MLP_l(h_i^(l), h_j^(l), e_ij)
+  h_i^(l+1) = LayerNorm(h_i^(l) + Update_l(m_i^(l)))
+where h are node states, e_ij bond features, and aggregation is the implementation's neighbor aggregation. Three layers are used, hidden width 96, followed by mean pooling. Do not claim the canonical GIN update `MLP((1+ε)h_i + Σh_j)` unless code proves that exact form.
+
+6.3 Target graph messages
+A high-level form for the custom relation-aware layer is:
+  m_i = normalize( Σ_{(j,r)∈E_i} w_{ijr} · (h_j ⊙ q_r) )
+where q_r is a learned relation-specific diagonal vector and weights/normalization follow implementation. Entity embeddings are learned. This is descriptive of the custom layer; exact relation direction, sign, and normalization must be confirmed from current code before publishing equations.
+
+6.4 Multimodal fusion and classification
+Let z_m,z_t,z_x denote molecular, target, and text modality outputs and a indicate available modalities. Attention combines modality tokens under availability mask a. A learned scalar gate produces scores g_k; normalized weights are:
+  α_k = exp(g_k) / Σ_{j∈available} exp(g_j)
+  z = Σ_{k∈available} α_k · z_k
+A classifier maps z through a 96-unit hidden layer, ReLU and dropout 0.15 to logits u∈R^3. Probabilities are `softmax(u)` (with temperature after fitting for the selected calibrated run). Missing modalities are masked, not replaced with invented feature content.
+
+6.5 Objective and calibration
+Training uses class-weighted cross-entropy with inverse training-class frequency weights and AdamW. Scalar temperature T is fit on validation logits by minimizing validation negative log-likelihood, optimizing log(T) with LBFGS. Calibrated probability is `softmax(u/T)`. For the selected pair-disjoint full model T=2.0856511593. Calibration is not clinical validation, and ECE/Brier metrics are distribution-dependent.
+
+7. TRAINING METHODOLOGY
+
+Training environment and software are in Section 16. Configurations vary by run; the run-specific config/evaluation is authoritative. Selected pair-disjoint full run: learning rate 0.001; weight decay 0.0001; ReduceLROnPlateau factor 0.5, patience 2; weighted cross-entropy; gradient clipping 2; batch size 512; early stopping patience 3; best validation checkpoint epoch 7; 10 epochs completed. Validation loss breaks the checkpoint selection tie. Cold-drug full experiment completed at epoch 10. Do not apply those values to every ablation unless the run config says so.
+
+The default training CLI has different defaults (seed 42, up to 20 epochs, batch 128, patience 4, hidden 96, lr 0.001); never confuse CLI defaults with the actual run. The full-model checkpoint's selection was validation based, not selected for the highest test metric. Training history and logs should be cited per run. Checkpoints and prior experiment artifacts are valuable and must be preserved.
+
+Class imbalance is handled through training class weights. This does not ensure high Minor/Major recall. Random seed 42 is used for the principal splits and RF baseline; paired bootstrap uses its own seed 20261020.
+
+8. EXPERIMENTAL DESIGN AND LEAKAGE PREVENTION
+
+8.1 Pair-disjoint
+Seed-42 stratified 70/15/15 split by canonical pair. Pairs are disjoint across train/validation/test; drugs can appear in multiple partitions. This measures generalization to unseen combinations among a largely familiar drug catalog, not unseen drugs.
+
+8.2 Cold-drug
+Drug identifiers are partitioned: 1,331 train, 285 validation, 286 test. Pairs crossing partitions are excluded (61,078 excluded). Labeled candidate split counts: train 63,447, validation 3,093, test 2,804. For full three-modality common support, test n=253, with Minor 14, Moderate 206, Major 33. Label-bearing test drugs are absent from supervised training/validation pairs under the cold-drug protocol.
+
+Important qualification: the global ChEMBL graph and external feature records may include test-partition drugs. This is external-side-feature transduction, so call this a cold-drug label split with external features available. It is not feature-blind zero-shot learning. Audit whether unsupervised graph construction or text corpus processing has split-specific fitting for each reported experiment.
+
+8.3 Manifests and paired support
+Split manifest hash and dataset hash are given in Section 4. Paired ablation comparisons use the same test-pair IDs per split; this avoids support changes confounding macro-F1 differences. Other audit metrics can use different supports and must not be compared as if matched. DailyMed TF-IDF is trained on training-drug text only for the selected pair-disjoint run; calibration is fit on validation only.
+
+8.4 Leakage/bias checks and risks
+Canonical pair IDs avoid duplicate-pair leakage. Split manifests and pair overlap checks are recorded. Remaining concerns include shared drugs in pair-disjoint testing (by design), external graph features for cold drugs, data-source overlap, and historical DDInter/label-text information that could embed source-related signals. No patient-level independence or prospective site-based evaluation is established.
+
+9. EVALUATION METRICS AND RESULTS
+
+9.1 Interpretation and artifact lineage
+Primary source: `artifacts/paired_multimodal_validation_v1/paired_multimodal_validation.json`; it records pair IDs, model-specific checkpoint/evaluation/prediction hashes, split/dataset manifests, target/text feature manifests, validation-only calibration, per-class metrics, confusion matrices, and paired bootstrap results. The full pair-disjoint checkpoint selected by validation is:
+`artifacts/multimodal_pair_disjoint_molecular_target_text_dailymed_common_support_trainfit_v1_support_molecular_target_text/best_validation.pt`
+SHA-256: `9259c34a964c48d30c849cb5480c8ac0a1453abf3b4936608c1a2435054d965c`.
+Configuration hash: `e151d9b71f3487b55980f584acd56cad1f6d283914933c2cce244db07121efee`.
+Evaluation hash: `a58a7d3a3a71e54bdc582e7cbefbdf5540528b03defb807bdfc42a608da572aa`.
+Best epoch 7; validation macro-F1 0.760529; selection uses validation performance/loss, not the test score. The paired analysis artifact includes a full-model comparison run/config in common support; make sure any checkpoint name cited for a table matches the embedded model entry, since the paired analysis includes multiple sibling checkpoints.
+
+9.2 Matched-support macro-F1 comparison
+All modalities/ablations below use common test pair IDs within each protocol. Label order Minor, Moderate, Major.
+
+Protocol          Support  Class support (Minor/Moderate/Major)
+Pair-disjoint       1,802  122 / 1,376 / 304
+Cold-drug             253  14 / 206 / 33
+
+Model                         Pair-disjoint F1     Cold-drug F1
+Text                              0.7708                0.3743
+Molecular + Text                  0.7836                0.3986
+Target + Text                     0.7743                0.3556
+Molecular + Target                0.6130                0.2821
+Full Molecular + Target + Text    0.7473                0.3664
+
+The full model is not the highest pair-disjoint macro-F1 in this ablation set; Molecular+Text is higher. Pair-disjoint full model is materially above Molecular+Target control. Cold-drug confidence intervals include zero for all four full-minus-comparator differences; the common-support cold sample is small, especially for Minor and Major. This is evidence of uncertainty, not proof that differences are exactly zero.
+
+9.3 Full model detailed metrics
+Pair-disjoint, n=1,802, calibrated test probabilities:
+Accuracy 0.8491; balanced accuracy 0.7830; macro-F1 0.7473; weighted-F1 0.8539; macro OVR AUROC: verify exact value from the paired JSON before quoting; multiclass Brier 0.21773; NLL 0.38025; ECE 0.01627 (15 equal-width bins). Per-class:
+Class       Precision   Recall     F1        Support
+Minor       0.5592      0.6967    0.6204    122
+Moderate    0.9322      0.8794    0.9050    1,376
+Major       0.6676      0.7730    0.7165    304
+Confusion matrix rows=true, columns=predicted, class order Minor/Moderate/Major:
+  [[85, 25, 12], [61, 1210, 105], [6, 63, 235]]
+
+Cold-drug, n=253, calibrated test probabilities:
+Accuracy 0.7787; balanced accuracy 0.3716; macro-F1 0.3664; weighted-F1 0.7278; multiclass Brier 0.36244; NLL 0.65499; ECE 0.07082 (15 bins). Per-class:
+Class       Precision   Recall     F1        Support
+Minor       0.2222      0.1429    0.1739     14
+Moderate    0.8151      0.9417    0.8739    206
+Major       0.1667      0.0303    0.0513     33
+Confusion matrix rows=true, columns=predicted:
+  [[2, 12, 0], [7, 194, 5], [0, 32, 1]]
+The cold-drug classifier predicts only 2 of 14 Minor correctly and only 1 of 33 Major correctly. Most Major cases (32/33) are predicted Moderate. These are important limitations, not a hidden footnote.
+
+9.4 Per-class metrics for all matched-support variants
+Pair-disjoint test support: Minor 122, Moderate 1,376, Major 304. Each entry is precision/recall/F1.
+- Text: Minor .640/.582/.609; Moderate .923/.932/.927; Major .778/.773/.776.
+- Molecular + Text: Minor .701/.615/.655; Moderate .925/.928/.927; Major .756/.783/.769.
+- Target + Text: Minor .735/.615/.670; Moderate .916/.928/.922; Major .729/.734/.731.
+- Molecular + Target: Minor .391/.500/.439; Moderate .864/.842/.853; Major .546/.549/.548.
+- Full: Minor .559/.697/.620; Moderate .932/.879/.905; Major .668/.773/.716.
+Supports for each class are 122/1,376/304. Confusion matrices (true rows; prediction columns in class order):
+Text [[71,42,9],[36,1282,58],[4,65,235]]
+Molecular+Text [[75,42,5],[27,1277,72],[5,61,238]]
+Target+Text [[75,39,8],[24,1277,75],[3,78,223]]
+Molecular+Target [[61,54,7],[86,1158,132],[9,128,167]]
+Full [[85,25,12],[61,1210,105],[6,63,235]]
+
+Cold-drug support: Minor 14, Moderate 206, Major 33. Per-class P/R/F1:
+- Text: Minor .250/.143/.182; Moderate .813/.908/.858; Major .133/.061/.083.
+- Molecular + Text: Minor .200/.214/.207; Moderate .822/.898/.858; Major .231/.091/.130.
+- Target + Text: Minor .200/.143/.167; Moderate .810/.908/.856; Major .083/.030/.044.
+- Molecular + Target: Minor .000/.000/.000; Moderate .810/.621/.703; Major .108/.212/.143.
+- Full: Minor .222/.143/.174; Moderate .815/.942/.874; Major .167/.030/.051.
+Confusion matrices in model order:
+Text [[2,12,0],[6,187,13],[0,31,2]]
+Molecular+Text [[3,10,1],[12,185,9],[0,30,3]]
+Target+Text [[2,12,0],[8,187,11],[0,32,1]]
+Molecular+Target [[0,11,3],[23,128,55],[7,19,7]]
+Full [[2,12,0],[7,194,5],[0,32,1]]
+
+9.5 Paired uncertainty comparisons
+Method: paired class-stratified percentile bootstrap on fixed test pair IDs, 10,000 replicates, seed 20261020, 95% intervals; observed class counts preserved. Difference is full minus comparator macro-F1. This is descriptive uncertainty, not model selection or a population guarantee.
+Comparator             Pair-disjoint Δ (95% CI)          Cold-drug Δ (95% CI)
+Molecular + Text        -0.0363 [-0.0602,-0.0121]       -0.0322 [-0.1000, 0.0231]
+Target + Text           -0.0270 [-0.0495,-0.0041]        0.0107 [-0.0058, 0.0298]
+Text                    -0.0235 [-0.0465, 0.0010]       -0.0080 [-0.0429, 0.0181]
+Molecular + Target       0.1343 [ 0.1035, 0.1662]        0.0843 [-0.0013, 0.1750]
+Pair-disjoint full model is lower than M+Text and T+Text; full-vs-text CI narrowly includes zero. In cold-drug comparisons, all intervals span zero. Do not conclude statistical superiority from point estimates alone.
+
+9.6 Other reported comparisons and caution
+The final audit also records experiments on different supports: molecular-only pair-disjoint macro-F1 0.7208 (n=13,893), molecular-only cold-drug 0.4248 (n=1,983), target-only pair-disjoint 0.6274 (n=9,265), target-only cold-drug 0.3660 (n=1,175), Random Forest pair-disjoint 0.7966 (n=13,893), Random Forest cold-drug 0.3528 (n=1,983), majority pair-disjoint accuracy 0.7413 and macro-F1 0.2838 (n=19,564). These supports differ from the 1,802/253 matched comparison and must not be ranked against it as if paired. The better standalone molecular-only cold score is an observation on a different sample; it does not prove that adding modalities harms the same cold pairs.
+
+9.7 Calibration report
+Calibration is temperature scaling fitted using validation only. The main pair-disjoint full run temperature is 2.0856511593. Calibration metrics are computed on test, not fitted there. Pair-disjoint full ECE 0.0163 and cold full ECE 0.0708; ECE depends on binning and support. Low ECE does not establish clinical calibration. Per-split test distributions differ. Before publication, verify AUROC exact values from JSON and include only metrics present in the target run's artifact.
+
+10. PREDICTION AND INFERENCE PIPELINE
+
+10.1 Flow
+Drug A + Drug B → accepted catalog/identity resolution → available molecular, target graph and text features → eligible research checkpoint selection → forward pass → validation-fitted temperature scaling when checkpoint is calibrated → class probabilities in `[Minor, Moderate, Major]` order → predicted class and provenance/coverage payload → frontend display.
+
+10.2 Supported inputs and behavior
+Research endpoint accepts project-supported drug identifiers/catalog entries. The current adapter handles configured feature combinations in this order: full molecular+target+text, molecular+target, molecular-only, target-only; text-only is not an exposed inference combination in the API adapter according to inspected source. Actual allowed IDs, request schema, limits, and missing-feature response must be taken from `ddi_guard/api.py` and service implementation. Unknown or unsupported drugs should produce explicit validation/unavailable errors, not fabricated molecular structures or evidence.
+
+10.3 Routes and policy
+`POST /api/research/predict` is local research inference for supported feature combinations, not production approval. It returns class/probabilities, model/checkpoint version, modality coverage, available supporting evidence/provenance, calibration metadata, and research limitations. `POST /api/predict` remains gated and returns HTTP 503 because `artifacts/model_approval.json` has `approved=false`, `checkpoint_path=null`, and clinical validation false. Do not flip approval settings. A successful research API call is not evidence that the production route is cleared.
+
+10.4 Distinguish three output types
+- Dataset label: source annotation in DDInter or another cited corpus.
+- Trained model prediction: inference from the checkpoint and available features, with model version and coverage.
+- Assistant text: LLM-generated conversational content; not validated prediction and not verified mechanism.
+Never present these interchangeably.
+
+11. EXPLAINABLE AI AND EVIDENCE
+
+Implemented: evidence/provenance retrieval from DailyMed text and record-level target/source provenance; modality coverage disclosure; calibrated class probability metadata. The UI may present available evidence passages tied to drug labels and target records, subject to route behavior.
+
+Not verified/implemented: validated atom-level attribution, bond contribution maps, target-specific causal explanations, SHAP for the selected GNN, faithful attention explanation, or clinically adjudicated explanation quality. Cross-attention weights and scalar gates are internal computational values; they do not establish that a modality caused a prediction or that a cited target explains a pair interaction. Evidence passages are associated with individual drug labels, not necessarily the exact pair. LLM summaries may hallucinate and must remain labeled as generated.
+
+12. BACKEND AND API ARCHITECTURE
+
+Framework: FastAPI application in `ddi_guard/api.py`. Local entry command is documented in Section 18. Routes observed include:
+- `GET /` application page.
+- Drug search/detail: `GET /api/drugs/search`, `GET /api/drugs/{id}`.
+- Structure: `GET /api/drugs/{id}/structure-3d`, `GET /api/drugs/{id}/structure-2d.svg`.
+- Pair lookup: `GET /api/interactions/lookup`.
+- Status/audits: `GET /api/status`, `/api/audit`, `/api/evaluation`, `/api/research-results`, `/api/system-status`.
+- Assistant: `POST /api/assistant/chat`.
+- Prediction: `POST /api/research/predict` (research-gated local route), `POST /api/predict` (HTTP 503 production gate).
+
+No `/api/chat/stream` server-sent-events route was found in the inspected route inventory. Chat schema supports 1–16 user/assistant messages, max 4,000 characters per content and 16,000 aggregate; last message must be user; optional selected drug identifiers are limited to two distinct valid IDs (verify exact schema if it changes). CORS, env configuration, and exception shapes should be quoted from current source before publication. Do not disclose secrets or log API keys.
+
+13. FRONTEND AND UI/UX
+
+Frontend is plain HTML/CSS/JavaScript in `ddi_guard/static/index.html`; no React/Tailwind package manifest or frontend build config was identified. Navigation has ten hash-based sections. Existing page areas include dashboard, drug pair explorer, molecular visualization, assistant, drug information/database, evidence, evaluation, pipeline, audit and research content. A floating bottom-left assistant UI was recently implemented, documented in `artifacts/floating_assistant_ui_report.md`. The user requested UI-only redesign in prior work; current task did not touch frontend.
+
+The Drug Pair Explorer should render actual API response payloads and explicit errors. It must not manufacture predicted results or evidence if API calls fail. Loading, missing features, and unavailable status should remain legible. Responsive behavior and accessibility need browser-level verification; frontend syntax was checked per QA artifact, but a full browser visual test is NOT VERIFIED. Do not claim clinical dashboard functionality just because the UI has clinical visual styling.
+
+14. 3D MOLECULAR VISUALIZATION
+
+The project serves structure data/2D SVG and verified 3D conformers where available. Reported 940 PubChem structures were graph-matched and validated as 3D conformers. 3D viewer uses 3Dmol.js from a CDN (verify static page URL). Structures are for visualization, not model input; the classifier consumes 2D molecular graph features. Distinguish PubChem-provided conformer/coordinate records from experimentally determined structures; do not label computational coordinates experimental without source evidence. Missing structures should show unavailable state. Browser/WebGL rendering, CDN availability, atom selection, and combined-scene behavior have not been confirmed by automated browser QA in the latest report.
+
+15. AI RESEARCH ASSISTANT AND GEMINI INTEGRATION
+
+Current implementation evidence: assistant backend route is `/api/assistant/chat`; default model is OpenAI `gpt-4.1-mini`; supported provider configuration is OpenAI/OpenAI-compatible via Python standard-library HTTP (`urllib`) according to source review. A Gemini SDK/provider implementation was NOT FOUND in the checked code. Prior user messages mention using a Gemini key, but that does not prove backend support. The assistant route reports missing provider key if no key is configured; do not include actual keys in this document. Expected environment names include `DDI_GUARD_AI_API_KEY` or `OPENAI_API_KEY`; inspect current code for provider/base URL/model variable names before setup.
+
+Chat endpoint is bounded; 429 handling retries once with a short wait up to about two seconds per saved report. This is not a robust quota scheduler; repeated rate limiting can still fail. Assistant answers may be ungrounded or hallucinated; they must not be presented as DDI model results, verified mechanisms, or medical advice. No streaming endpoint found. Live provider configuration and successful live calls are NOT VERIFIED. Never store keys in source, commit history, screenshots, logs, or this document.
+
+16. TECHNOLOGY STACK AND DEVELOPMENT ENVIRONMENT
+
+Verified reported environment (from project QA report): macOS 14.5, arm64, Python 3.13.12, 8 CPU cores, 8 GB RAM, no CUDA. Key package versions: PyTorch 2.11, PyTorch Geometric 2.7, RDKit 2026.3.1, scikit-learn 1.8, NumPy 2.4.4, FastAPI 0.136.1, pandas 3.0.2. Recheck `pyproject.toml` and environment before reproducing; packages may update.
+
+- Python: ingestion, graph construction, training, evaluation, API.
+- PyTorch: neural model and checkpoint handling.
+- PyTorch Geometric: graph tooling/dependency; identify exact use per module before saying each layer uses it.
+- RDKit: SMILES parsing, molecular graph and chemistry validation.
+- scikit-learn: TF-IDF and conventional ML/baseline metrics/models.
+- NumPy/pandas: arrays, tabular ingestion and evaluation.
+- FastAPI/Pydantic/Uvicorn: backend and API schemas/server.
+- 3Dmol.js: browser-side molecular rendering.
+- `unittest`/pytest tools: Python test suite (latest QA says 73 passing; inspect runner config for exact command).
+- SQLite: ChEMBL source database; not the application database.
+- Frontend: browser-native HTML/CSS/JS; no frontend package manager/build was found.
+- Gemini SDK: NOT FOUND. XGBoost: NOT FOUND. React/Tailwind: NOT FOUND.
+
+17. PROJECT DIRECTORY AND IMPORTANT FILES
+
+Root: this project repository.
+Key paths referenced by audited source/artifacts:
+- `ddi_guard/ingest.py` — DDInter ingestion, canonicalization, exclusion ledger.
+- `ddi_guard/features.py` — graph/molecule feature construction.
+- `ddi_guard/model.py` — model classes and modality fusion.
+- `ddi_guard/api.py` — FastAPI routes and policy boundaries.
+- `ddi_guard/static/index.html` — single-page frontend.
+- `pyproject.toml` — Python package/dependency configuration.
+- `README.md` — user setup and current system narrative (some docs may be stale; see below).
+- `artifacts/final_audit_report.md` — latest narrative audit.
+- `artifacts/implementation_matrix.md` — component status matrix; recorded test count may be older.
+- `artifacts/model_approval.json` — production gate metadata.
+- `artifacts/qa_status.json` — latest reported QA status (73 pass).
+- `artifacts/paired_multimodal_validation_v1/paired_multimodal_validation.json` — matched-support metrics and bootstrap.
+- `artifacts/split_manifest.json` — fixed split records/hash.
+- `artifacts/multimodal_coverage_audit.json`, `artifacts/dailymed_evidence_coverage_audit.json` — coverage/provenance audits.
+- `artifacts/floating_assistant_ui_report.md` — recent UI work report.
+- `data/processed/ddi_pairs_full.json`, pair manifest, exclusion ledger, identity map, class distribution.
+- `data/processed/text_evidence_embeddings_manifest_pair_disjoint_trainfit_v1.csv` — verified split-fit text manifest.
+- `data/raw/chembl_34_extracted/.../chembl_34.db` — extracted ChEMBL database where present.
+- `data/raw/chembl_34/REQUIRED.ATTRIBUTION` — ChEMBL attribution.
+- `tests/` — Python tests.
+- Model/evaluation folders under `artifacts/multimodal_pair_disjoint_*` and cold-drug counterparts contain checkpoints, configs, logs, predictions, and evaluation JSON. Preserve them.
+
+Stale/conflicting documentation discovered:
+- `artifacts/final_year_project_summary.md` states research route not exposed/disabled, conflicting with current route implementation/audit.
+- `artifacts/model_card.md` describes offline-only behavior and disabled research API; appears stale versus current research adapter.
+- `artifacts/feature_schema.json` reports text “Not yet ingested”/768 dimensions, inconsistent with real DailyMed ingestion and current 2,048-dimensional TF-IDF features.
+- `implementation_matrix.md` records an older 71-test count while `qa_status.json` reports 73 passing.
+Do not silently edit those records as part of this knowledge-only task. Current source and hash-pinned artifacts should be rechecked before relying on their status.
+
+18. INSTALLATION, CONFIGURATION, AND EXECUTION
+
+Commands observed in project records; verify that dependencies/path remain valid on the target Mac. This document-generation task did not execute these commands.
+
+Start local backend/application from project root:
+  python3 -m uvicorn ddi_guard.api:app --host 127.0.0.1 --port 8000
+Then open:
+  http://127.0.0.1:8000/
+
+Tests: `qa_status.json` says suite completed with 73 passing. Exact test invocation should be taken from README/pyproject or QA runner; do not assume `pytest` is the canonical command if project uses unittest discovery. Syntax checks reported compileall and frontend JS syntax checks passing. This task did not rerun them.
+
+Training, preprocessing and evaluation commands are intentionally NOT reproduced here because exact current CLI arguments, source availability and run manifest need checking per script. The scripts' defaults differ from selected experiment settings. To reproduce a research result, use the exact run config, fixed split manifest, feature manifests, checkpoint/evaluation script and recorded hashes—not generic defaults.
+
+Assistant environment: set provider key only in the local backend environment or an ignored `.env` if supported by the current loader; do not paste it into code or source control. Gemini keys alone will not work unless actual Gemini provider support is implemented (not found in reviewed source). Live provider behavior not verified.
+
+19. TESTING AND QUALITY ASSURANCE
+
+Latest record: `artifacts/qa_status.json` reports 73 passing tests on 2026-10-21, plus Python compileall, frontend syntax checking, and paired evaluation script exit 0. The prior implementation matrix says 71 tests, which is stale relative to that QA record. This documentation task did not rerun the suite or syntax checks. Check exact test runner and command before claiming reproducibility.
+
+Test coverage is reported for data/preprocessing validation, model/checkpoint behavior, API logic, research prediction safeguards, and assistant/UI integrations. Do not claim a particular test count by category without inspecting the test inventory. UI browser flows and WebGL 3D rendering are not established by a JS syntax check. Gemini live provider integration is not verified. Research API parity/reload checks are recorded in QA/audit evidence; production route remains gated by policy.
+
+20. SECURITY, ETHICS, AND CLINICAL LIMITATIONS
+
+- Research-only: no clinical validation, regulator authorization, prospective outcome evaluation, or clinician workflow validation is established.
+- False negatives are material; cold-drug full model missed 12/14 Minor and 32/33 Major test cases in the matched-support set.
+- Class imbalance and small rare-class support make scores uncertain.
+- Cold-drug performance is much lower than pair-disjoint performance and the protocol permits external graph/feature exposure; it is not strict feature-blind zero-shot evaluation.
+- DailyMed coverage is 33.6% of mapped inputs; missing modalities reduce supported pairs and may introduce selection bias.
+- Calibration is fitted on validation for a particular dataset and split. It does not establish patient-level risk calibration or transfer to another population.
+- External source data may have licensing/attribution obligations; preserve source manifests and required notices.
+- Assistant text is an LLM response and may be wrong. No key or private data should be committed or logged. Avoid sending patient-identifying information.
+- Do not use output to initiate, stop, or change treatment. Consult authoritative prescribing information and qualified clinicians/pharmacists.
+- A severity label is not a complete clinical recommendation; patient age, renal/hepatic status, dose, indication, route, timing and concomitant conditions are not modeled as patient context.
+
+21. CURRENT PROBLEMS AND UNRESOLVED ISSUES
+
+Issue | Evidence | Impact | Status | Recommended next step
+Cold-drug generalization weak | Full macro-F1 0.3664; Major recall 0.0303; Minor recall 0.1429 | Unreliable unseen-drug classification | Confirmed | Investigate training coverage and feature transfer using train/validation only; design prospective or external validation.
+DailyMed incompleteness | 652/1,939 mapped drugs; 393 HTTP 429 errors | Many pairs lack text features | Confirmed | Retry only failed IDs using backoff policy; retain corpus and provenance.
+Some ChEMBL mapping ambiguity | 174 ambiguous candidates | Potential feature mapping error or dropped coverage | Confirmed | Review mapping rules and ambiguous records with provenance; don't force mappings.
+No clinical validation | approval JSON clinical_validation=false; no clinical cohort artifact identified | Cannot support treatment decisions | Confirmed | Requires separate clinical protocol, governance, data, validation, and regulatory review.
+Production prediction disabled | `model_approval.json`: approved false, no checkpoint path | `/api/predict` returns 503 | Confirmed intentional gate | Keep gate; complete approval process rather than changing metadata to bypass it.
+Text-only research inference unavailable | adapter routes listed modalities but no text-only route | Cannot query text-only for arbitrary pair via API | Confirmed in inspected adapter | Implement only through reviewed code change and tests if needed.
+Documentation drift | summary/model card/feature schema conflict with current implementation | Misleads users and reviewers | Confirmed | Reconcile documents with current artifacts in a separately authorized project change.
+Gemini provider not found | source shows OpenAI/OpenAI-compatible only | Gemini key may not enable assistant | Confirmed in inspected source | Verify current provider implementation; use supported OpenAI-compatible setup or implement provider separately.
+Frontend browser/WebGL QA incomplete | QA record includes syntax, not end-to-end browser render | Visual/runtime issues may remain | Unverified | Run browser checks on supported Mac and capture actual errors.
+Data redistribution legal review incomplete | several sources and ChEMBL attribution requirements | Risks incorrect redistribution | Not verified | Review source licenses and derived-data terms before packaging/publishing.
+
+22. FUTURE SCOPE
+
+22.1 Immediate engineering
+Reconcile stale documentation; expose coverage/error state consistently; retry DailyMed failures with conservative backoff; add cache and resumable downloader safeguards; verify API errors and frontend rendering in browser; make each result identify exact checkpoint and feature manifests.
+
+22.2 ML research
+Analyze class-wise errors using training/validation data; evaluate class weighting/focal approaches only as new experiments; test calibration methods with validation-only fitting; conduct nested or repeated group splits; evaluate confidence intervals and external generalization; compare with simple baselines on matched pair IDs; quantify uncertainty without selecting based on held-out test.
+
+22.3 Cold-drug generalization and coverage
+Use drug-group-aware split design with feature graph protocol explicitly controlled; report transductive vs inductive conditions; increase Minor/Major evidence; assess structure/target/text missingness; obtain independent source data and prospective validation where ethically approved.
+
+22.4 Explainability and evidence
+Implement validated atom/edge attribution with fidelity and stability tests; distinguish retrieved text from model explanations; attach source citations and record hashes; have biomedical experts adjudicate explanation quality; avoid implying causal mechanisms.
+
+22.5 UI, deployment, and clinical validation
+Improve accessible evidence and missing-feature presentation; validate browser/WebGL on real devices. Production deployment requires security/privacy review, monitoring, rollback, model governance, clinical utility protocol, external validation, applicable regulatory analysis in India, and explicit approval. These are future requirements, not current capabilities.
+
+23. RESEARCH PAPER PREPARATION
+
+23.1 Suggested title
+“Multimodal Drug–Drug Interaction Severity Classification with Molecular, Drug–Target, and Drug-Label Features: Pair-Disjoint and Cold-Drug Evaluation”
+
+23.2 Keywords
+Drug–drug interactions; severity classification; molecular graph neural networks; drug–target network; DailyMed; multimodal learning; data provenance; cold-drug evaluation; calibration.
+
+23.3 Abstract basis
+Use the abstract in Section 1.1 as a draft, but add exact study dates, protocol and all metric definitions after checking source artifacts. State full model's pair-disjoint and cold-drug common supports and the 14 Minor cold test support. Avoid phrases such as “clinical prediction,” “clinically accurate,” or “mechanism explainability.”
+
+23.4 Paper structure and claims
+Introduction: clinical/research context; scope; gap in coverage/generalization; contributions stated as system and evaluation. Related work: search and cite real DDI severity prediction, graph ML, multimodal biomedical learning, interaction databases and calibration papers; literature survey still needed, references NOT VERIFIED here.
+Methods: DDInter preprocessing, PubChem/ChEMBL/DailyMed provenance, missingness, encoders, fusion, objective, split definitions, matched support, calibration. Experimental setup: hardware/packages, run configurations, seeds, checkpoints, manifests and hashes. Results: per-class metrics, confusion matrices, calibration, matched-support ablations and paired CIs. Discussion: full vs ablations, strong Moderate performance, weak cold class performance, transductive caveat. Limitations: sparse class support, source coverage, no clinical validation, evidence not pair-specific, missingness, dataset bias. Conclusion: research benchmark/system only.
+
+Supported contribution claims: an auditable three-source-modality implementation; provenance-tracked feature construction; fixed pair/cold label evaluation; common-support ablations and bootstrap comparisons; local research inference route. Unsupported claims: state-of-the-art, causal explanation, clinical readiness, superiority of full model, improved patient outcomes, or complete text coverage.
+
+Before submission, include formal source citations and data-use/licensing statements; verify exact code/config revisions, AUROC/Brier/NLL definitions, bootstrap resampling unit, checkpoint hashes, and all sample denominators. Provide a data/code availability statement that respects dataset terms.
+
+24. POWERPOINT PRESENTATION PREPARATION (15 SLIDES)
+
+Slide 1 — Title and project details
+Points: DDI-GUARD; student/team/guide/institution fields to fill from verified records.
+Visual: project title with actual application screenshot.
+Fact: research/academic prototype; do not call clinically approved.
+Speaker note: introduce task and classification labels.
+
+Slide 2 — Problem statement
+Points: pairwise drug interaction severity is difficult to prioritize; resources are fragmented.
+Visual: pair input → severity class diagram.
+Fact: DDInter provides source labels, not patient-specific outcomes.
+Speaker note: define scope as dataset classification.
+
+Slide 3 — Motivation and research gap
+Points: complement molecular, target network and label text; missing modality coverage matters.
+Visual: three feature streams and missingness markers.
+Fact: DailyMed coverage is 652/1,939 mapped inputs.
+Speaker note: distinguish research question from proven improvement.
+
+Slide 4 — Objectives and contributions
+Points: ingest/provenance; multimodal models; fixed split evaluation; research demo.
+Visual: objective checklist.
+Fact: three modalities have actual feature pipelines.
+Speaker note: avoid claim of clinical utility.
+
+Slide 5 — Dataset and preparation
+Points: DDInter labels; PubChem structures; ChEMBL 34 activity; DailyMed sections.
+Visual: source-count table with denominators.
+Fact: 130,422 unique labeled DDInter pairs; clarify the 1,802/253 evaluation supports.
+Speaker note: distinguish source records from train/test examples.
+
+Slide 6 — System architecture
+Points: identity resolution, data sources, encoders, fusion, classifier, evidence and report.
+Visual: actual architecture figure from project specification, annotated with verified implementation.
+Fact: production route remains gated.
+Speaker note: label unavailable/partial inputs.
+
+Slide 7 — Model architecture
+Points: 3-layer molecular message passing; custom relation-aware target graph; 2,048 TF-IDF text; attention/gated fusion.
+Visual: code-grounded architecture block diagram.
+Fact: not PubMedBERT, not canonical GIN/R-GCN unless proven.
+Speaker note: explain pair symmetry.
+
+Slide 8 — Method and equations
+Points: sum/absolute-difference/product pair features; weighted CE; softmax; validation-fitted temperature.
+Visual: concise equations from Section 6.
+Fact: selected pair-disjoint temperature 2.085651.
+Speaker note: calibration is not clinical validation.
+
+Slide 9 — Training and evaluation design
+Points: seed 42 splits; pair-disjoint vs cold-drug; validation-only checkpoint/calibration.
+Visual: split counts and protocol diagram.
+Fact: cold drug-label split may use external graph features.
+Speaker note: explain transductive caveat.
+
+Slide 10 — Results
+Points: matched-support metrics and 95% paired bootstrap intervals.
+Visual: table comparing 5 models, two split columns.
+Fact: full .7473 PD, .3664 cold; M+Text .7836 PD/.3986 cold.
+Speaker note: full model does not top pair-disjoint ablation; cold intervals include zero.
+
+Slide 11 — Class performance and uncertainty
+Points: class P/R/F1, confusion matrix, rare-class limitations.
+Visual: cold confusion matrix and highlight Minor support 14.
+Fact: cold Minor recall 2/14; Major recall 1/33.
+Speaker note: discuss uncertainty and false negatives.
+
+Slide 12 — Evidence and explanation
+Points: provenance-backed label passages and source records; no verified atom attribution.
+Visual: real evidence UI response, with source and timestamp.
+Fact: evidence is drug-level and not always pair-specific.
+Speaker note: distinguish attribution from retrieved evidence.
+
+Slide 13 — Application demonstration
+Points: drug pair explorer, real API response/error, molecule viewer, assistant panel.
+Visual: screenshot from actual running app.
+Fact: research route vs production 503.
+Speaker note: show only real response; redact keys/patient data.
+
+Slide 14 — Limitations and future work
+Points: partial text coverage; cold-drug scores; class imbalance; no clinical validation; docs drift.
+Visual: limitations/next-step matrix.
+Fact: production gate remains disabled.
+Speaker note: no diagnosis/treatment recommendation.
+
+Slide 15 — Conclusion and references
+Points: research system and measured results; explicitly state boundaries.
+Visual: concise three takeaways and references.
+Fact: use only verified cited sources and actual project artifact references.
+Speaker note: invite technical questions.
+
+25. VIVA PREPARATION — 50 QUESTIONS AND ANSWERS
+
+Q1. What is DDI-GUARD?
+A. An academic research system that classifies DDInter drug pairs into Minor, Moderate, or Major using molecular, target-network, and DailyMed text modalities, with local research inference and provenance display.
+
+Q2. What problem does it address?
+A. It explores computational prioritization of pairwise DDI severity labels. It does not replace clinical review or authoritative labels.
+
+Q3. What are the three classes?
+A. Minor, Moderate, and Major, mapped from DDInter labels. The model predicts dataset categories, not patient-specific risk.
+
+Q4. What is a pharmacokinetic interaction?
+A. An interaction affecting absorption, distribution, metabolism, or excretion. That is domain context; the model does not explicitly simulate all these processes.
+
+Q5. What is a pharmacodynamic interaction?
+A. An interaction between drug effects on biological targets or pathways. Model graph features are not proof of causal pharmacodynamics.
+
+Q6. What is the main labeled dataset?
+A. DDInter 2.0, ingested from eight ATC CSV exports listed in the audit.
+
+Q7. How many unique labeled pairs were audited?
+A. 130,422 after canonicalization and duplicate handling; experimental test supports are much smaller and must be stated separately.
+
+Q8. Why canonicalize a pair?
+A. The same unordered pair must have a single stable identity whether source order is A,B or B,A. The code sorts IDs and generates deterministic pair identifiers.
+
+Q9. What happens to unknown labels?
+A. They are tracked in the exclusion ledger; unknown-only pairs are not assigned a supervised severity label.
+
+Q10. How are duplicate pair records handled?
+A. Labeled duplicates are collapsed under the ingestion rules; the audit records 44,779 duplicate labeled rows and 62,148 duplicates including unknown rows.
+
+Q11. What is a SMILES string?
+A. A text representation of molecular structure; RDKit parses accepted SMILES into atom/bond graphs.
+
+Q12. What molecular features are used?
+A. 47 atom features and 16 bond features, with bidirectional bond edges as graph connectivity.
+
+Q13. Is the model a GIN?
+A. It is a custom edge-conditioned molecular message-passing GNN. A canonical GIN update was not verified, so I would not label it GIN.
+
+Q14. What is message passing?
+A. Neighbor information is transformed and aggregated to update node representations over graph layers.
+
+Q15. How many molecular message-passing layers?
+A. Three, with hidden size 96, residual updates, LayerNorm, and mean pooling per the inspected model.
+
+Q16. What is ChEMBL used for?
+A. ChEMBL 34 activity records provide drug-target relationships and provenance for a biological network feature pathway.
+
+Q17. What is a target graph?
+A. A graph linking drug entities and biological targets through sourced activity relations; graph presence is not itself a DDI label.
+
+Q18. Is the target encoder a canonical R-GCN?
+A. It is custom relation-aware with learned relation-specific diagonal vectors. It has R-GCN-like intent but canonical RGCNConv was not verified.
+
+Q19. How is DailyMed used?
+A. Selected SPL warning, drug-interaction, and clinical-pharmacology passages are retained and transformed into 2,048-dimensional TF-IDF vectors.
+
+Q20. Is the text encoder PubMedBERT?
+A. No. The checked implementation uses TF-IDF, not PubMedBERT or another transformer.
+
+Q21. What does the pair representation do?
+A. It concatenates sum, absolute difference, and elementwise product of drug feature vectors to treat the pair symmetrically.
+
+Q22. What does multimodal mean here?
+A. The model combines molecular graphs, a drug-target graph representation, and label text features.
+
+Q23. How is fusion performed?
+A. Modality outputs are processed as tokens with four-head attention, availability masks, and learned softmax gates for weighted fusion.
+
+Q24. Does attention prove which modality caused a prediction?
+A. No. Attention/gating values are internal weights and have not been validated as faithful explanations.
+
+Q25. What is the classifier output?
+A. Three logits converted to probabilities ordered Minor, Moderate, Major.
+
+Q26. What loss is used?
+A. Weighted multiclass cross-entropy, with inverse training class frequency weights in the reported full run.
+
+Q27. How is the model optimized?
+A. AdamW; the selected pair-disjoint full run uses learning rate 0.001 and weight decay 0.0001, with scheduler and gradient clipping as recorded.
+
+Q28. How is checkpoint selected?
+A. By validation performance with validation loss tie-break; selected pair-disjoint full checkpoint best epoch is 7, not chosen using test results.
+
+Q29. What is temperature scaling?
+A. Dividing logits by a scalar temperature before softmax. The scalar is fitted on validation NLL to adjust probability sharpness.
+
+Q30. Why use macro-F1?
+A. It averages class F1 equally, so minority classes influence the score more than in accuracy. It can still be unstable when a class has few examples.
+
+Q31. What is the pair-disjoint split?
+A. A stratified split over canonical pairs, where pairs do not repeat across partitions but the same drug may appear in multiple partitions.
+
+Q32. What does cold-drug mean in this project?
+A. Drugs are partitioned across train/validation/test and cross-partition pairs are excluded. It tests label generalization to held-out drug IDs, with external side-feature caveat.
+
+Q33. Is cold-drug zero-shot feature-blind?
+A. No. ChEMBL/global external features can include held-out drugs; describe it as cold-drug label evaluation with external features available.
+
+Q34. Why is pair-disjoint performance higher?
+A. The model can encounter familiar drugs and their features in different test pairs. That setting is easier than generalizing to unseen drug identities.
+
+Q35. What is full-model pair-disjoint macro-F1?
+A. 0.7473 on the common-support 1,802 test pairs in the paired ablation artifact.
+
+Q36. What is full-model cold-drug macro-F1?
+A. 0.3664 on 253 common-support pairs.
+
+Q37. How many cold-drug Minor test cases are there?
+A. Fourteen. Full-model Minor recall is 2/14, or about 0.1429, so this estimate is highly uncertain.
+
+Q38. How did the full model perform on cold Major?
+A. Major recall was 1/33 (0.0303); the confusion matrix shows 32 of 33 labeled Major were predicted Moderate.
+
+Q39. Did the full model beat every ablation?
+A. No. Molecular+Text had macro-F1 0.7836 on pair-disjoint common support, higher than full model's 0.7473.
+
+Q40. What is the paired bootstrap?
+A. A class-stratified resampling of the same test pair IDs, 10,000 replicates, seed 20261020, producing descriptive 95% confidence intervals for macro-F1 differences.
+
+Q41. Why matched support?
+A. If models are tested on different pairs due to missing modalities, score changes can reflect sample composition. Matched support isolates comparisons on the same examples.
+
+Q42. What does ECE measure?
+A. A binned difference between confidence and empirical accuracy. It depends on binning and data distribution and is not proof of clinical calibration.
+
+Q43. What is the selected pair-disjoint checkpoint path?
+A. `artifacts/multimodal_pair_disjoint_molecular_target_text_dailymed_common_support_trainfit_v1_support_molecular_target_text/best_validation.pt`, SHA-256 `9259c34a...d965c` (quote full hash from Section 9).
+
+Q44. Is prediction enabled in production?
+A. No. `/api/predict` remains HTTP 503 because approval metadata has approved=false and no approved checkpoint; `/api/research/predict` is a separate local academic route.
+
+Q45. Does the research API make the model clinically ready?
+A. No. It provides local demonstration inference only and does not satisfy clinical validation or regulatory approval.
+
+Q46. What is the difference between evidence and explanation?
+A. Evidence is retrieved source material with provenance. An explanation attributes a model output; this project has not verified atom-level or causal explanations.
+
+Q47. Are 3D conformers model inputs?
+A. No. The classifier uses molecular graph features; 3D structures are for visualization.
+
+Q48. How does the assistant differ from the DDI model?
+A. The assistant generates language through an external AI provider. The prediction API runs the trained model; an assistant answer is not a model probability or verified mechanism.
+
+Q49. Does the project support Gemini?
+A. No Gemini SDK/provider was found in the checked source. Current code reportedly supports OpenAI/OpenAI-compatible provider configuration; verify current env settings before demo.
+
+Q50. What is the most important limitation to state?
+A. The system is not clinically validated, cold-drug performance is weak with very low Minor/Major recall, and DailyMed coverage is partial. It must not guide treatment.
+
+26. GLOSSARY
+
+DDI — Drug–drug interaction: one drug may alter the effect/exposure/safety of another.
+GNN — Graph neural network: a neural model that updates node/graph representations using graph neighborhoods.
+GIN — Graph Isomorphism Network: a specific GNN family; canonical GIN was not established as this project's layer.
+R-GCN — Relational graph convolutional network: graph convolution supporting multiple edge relations; the project uses a custom relation-aware encoder, not verified canonical R-GCN.
+SMILES — String representation of a molecular structure.
+Molecular graph — Atoms as nodes and bonds as edges.
+Multimodal fusion — Combining signals from different modalities; here molecular, target graph, text.
+Attention — Learned weighting/mixing over representations; not automatically an explanation.
+Calibration — Agreement between predicted probability and empirical frequency under a defined distribution.
+Macro-F1 — Arithmetic mean of class-wise F1 scores.
+AUROC — Area under receiver operating characteristic curve; multiclass results depend on averaging strategy.
+Brier score — Mean squared error of probabilistic predictions against one-hot outcomes.
+ECE — Expected calibration error, typically a bin-weighted confidence/accuracy gap.
+Pair-disjoint split — Pair identities are separated between partitions; drugs may overlap.
+Cold-drug split — Drug identities are partitioned to evaluate label generalization on held-out drugs; feature access must be explicitly described.
+Inference — Applying a trained model to input features to obtain outputs.
+Checkpoint — Saved model state/configuration used for later inference or evaluation.
+Provenance — Metadata tracing a record/feature to its source, identifier, timestamp and content hash.
+TF-IDF — Term frequency–inverse document frequency text vectorization.
+SPL — Structured Product Label, the structured label content distributed through DailyMed.
+Temperature scaling — Validation-fitted scalar transformation of logits for probability calibration.
+
+27. FACTS THAT MUST BE VERIFIED BEFORE PUBLICATION
+
+1. Recompute SHA-256 for every checkpoint, evaluation JSON, prediction file, split manifest, dataset manifest, text feature manifest, target graph manifest, and paired-analysis artifact cited in the final paper.
+2. Confirm the selected checkpoint's exact config, epoch, validation score, test metrics, checkpoint-reload result and relationship to the paired common-support run. Do not mix checkpoint-specific results across folders.
+3. Re-read the exact AUROC fields for each reported run; this document intentionally does not supply the full model AUROC values where they were not independently rechecked in this pass.
+4. Verify all per-class metrics, confusion-matrix conventions, probability calibration metrics, ECE bin count, class order and support directly against the machine-readable evaluation JSON.
+5. Confirm that the pair-disjoint and cold-drug split manifests match the stated seed, data hash, counts, exclusion policy and drug/pair overlap assertions.
+6. Reconcile external graph feature exposure in cold-drug runs; state whether graph entities/edges and text corpus are global or split-specific for each experiment.
+7. Confirm the 2026-10-21 test count (73) from a fresh test run before presenting it as current. This knowledge-document task did not run tests.
+8. Inspect current `model_approval.json`, current API route behavior, and research policy before a live demo; preserve HTTP 503 on production endpoint unless explicitly approved through legitimate review.
+9. Verify actual environment variables and provider support. No secrets should be included. Gemini integration is not established by the reviewed source.
+10. Obtain current DDInter release documentation and label definitions; verify exact licensing and attribution for all data sources and derived records.
+11. Confirm PubChem identifier matching methods, accepted structure quality rules, and 3D conformer source/experimental status before describing them in a paper.
+12. Recheck DailyMed retrieval counts, section selection, 429 errors, manifests, hashes, retry behavior, and whether the conservative retry policy was actually used; do not imply it already ran unless logs prove it.
+13. Verify every attribution/evidence item's source URL and record/document ID. Do not equate drug-level label text with pair-specific mechanism evidence.
+14. Test frontend through an actual browser on the target Mac, including unsupported drugs, missing modalities, API errors, accessibility, responsive layout, and WebGL viewer rendering.
+15. Confirm whether assistant calls can send user content externally and document privacy behavior; do not use patient identifiers.
+16. Obtain independent external validation and clinical governance before any clinical/production claims. The current project has no verified clinical validation or regulatory approval.
+17. Verify all manuscript citations, author/year/DOI and publication claims from publisher or primary sources; none should be invented from this knowledge document.
+18. State the 14 Minor cold-drug support and the 2/14 recall result prominently whenever discussing cold performance.
+19. Distinguish matched-support ablation results from broader-support results, especially RF and single-modality metrics.
+20. Reconcile stale README/audit/model-card/implementation-matrix/feature-schema statements in a separately authorized documentation update. This task did not modify project documents.
+
+DOCUMENT STATUS
+This file is a detailed working reference composed from project evidence recorded during inspection. It is not a substitute for fresh artifact verification at publication time. Unknown or contradictory facts are explicitly marked; source files remain the authority.
